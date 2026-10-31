@@ -7,6 +7,7 @@ import { AuditLog, redact } from "../src/audit";
 import { CheckoutSession } from "../src/checkout/session";
 import { MockPayPalClient } from "../src/paypal/mock-client";
 import type { CheckoutOrder, PayPalOrdersClient } from "../src/paypal/types";
+import { deterministicProposal } from "../src/policy/validate";
 import { DeterministicPlanner, type Planner } from "../src/planner/planner";
 
 const origin = "http://127.0.0.1:4320";
@@ -22,7 +23,7 @@ describe("mock checkout", () => {
     const file = path.join(dir, "audit.jsonl");
     const desk = session(paypal, new DeterministicPlanner(), file);
     await desk.draft("happy");
-    desk.confirm();
+    await desk.confirm();
     await desk.createOrder(origin);
     desk.approveMock();
     paypal.captureFailuresRemaining = 1;
@@ -47,7 +48,7 @@ describe("mock checkout", () => {
     const paypal = new MockPayPalClient();
     const over = session(paypal);
     await over.draft("over-cap");
-    over.confirm();
+    await over.confirm();
     const refused = await over.createOrder(origin);
     assert.equal(refused.phase, "rejected");
     assert.match(refused.narrative, /240\.00/);
@@ -55,7 +56,7 @@ describe("mock checkout", () => {
 
     const merchant = session(paypal);
     await merchant.draft("off-list");
-    merchant.confirm();
+    await merchant.confirm();
     const blocked = await merchant.createOrder(origin);
     assert.equal(blocked.phase, "rejected");
     assert.match(blocked.narrative, /Night Market LLC/);
@@ -66,14 +67,14 @@ describe("mock checkout", () => {
     const paypal = new MockPayPalClient();
     const desk = session(paypal);
     await desk.draft("amount-change");
-    desk.confirm();
-    const revised = desk.revise();
+    await desk.confirm();
+    const revised = await desk.revise();
     assert.equal(revised.phase, "reapproval");
     assert.match(revised.narrative, /86\.00/);
     assert.match(revised.narrative, /110\.00/);
     await assert.rejects(() => desk.createOrder(origin), /Confirm the policy/);
     assert.equal(paypal.calls.includes("create"), false);
-    desk.confirm();
+    await desk.confirm();
     await desk.createOrder(origin);
     desk.approveMock();
     const done = await desk.capture();
@@ -86,9 +87,9 @@ describe("mock checkout", () => {
     const paypal = new MockPayPalClient();
     const cancel = session(paypal);
     await cancel.draft("cancel");
-    cancel.confirm();
+    await cancel.confirm();
     await cancel.createOrder(origin);
-    const cancelled = cancel.cancel();
+    const cancelled = await cancel.cancel();
     assert.equal(cancelled.phase, "cancelled");
     assert.equal(cancelled.order?.status, "VOIDED");
     assert.equal(paypal.calls.includes("capture"), false);
@@ -96,7 +97,7 @@ describe("mock checkout", () => {
     const declinePaypal = new MockPayPalClient();
     const decline = session(declinePaypal);
     await decline.draft("declined");
-    decline.confirm();
+    await decline.confirm();
     await decline.createOrder(origin);
     decline.approveMock();
     const declined = await decline.capture();
@@ -159,7 +160,7 @@ describe("mock checkout", () => {
     };
     const desk = session(paypal);
     await desk.draft("happy");
-    desk.confirm();
+    await desk.confirm();
     const waiting = await desk.createOrder(origin);
     assert.equal(waiting.phase, "awaiting_buyer");
     assert.equal(waiting.approval?.linkLabel, "Open PayPal approval");
@@ -175,6 +176,134 @@ describe("mock checkout", () => {
     const done = await desk.capture();
     assert.equal(done.phase, "completed");
     assert.equal(done.order?.captureId, "CAP123");
+  });
+});
+
+describe("PayPal return", () => {
+  it("refreshes the order the desk created", async () => {
+    let status = "CREATED";
+    const paypal = returningClient(() => status, (next) => {
+      status = next;
+    });
+    const desk = session(paypal);
+    await desk.draft("happy");
+    await desk.confirm();
+    const created = await desk.createOrder(origin);
+    status = "APPROVED";
+    const returned = await desk.noteReturn(created.order!.id);
+    assert.equal(returned.phase, "approved");
+    assert.equal(returned.gates.canCapture, true);
+    assert.match(returned.narrative, /APPROVED|approved/);
+    assert.doesNotMatch(returned.narrative, /did not create it/);
+  });
+
+  it("adopts an order created outside this session when the audit log has the policy", async () => {
+    let status = "CREATED";
+    const paypal = returningClient(() => status, (next) => {
+      status = next;
+    });
+    const dir = mkdtempSync(path.join(tmpdir(), "acs-return-"));
+    const file = path.join(dir, "audit.jsonl");
+    const first = session(paypal, new DeterministicPlanner(), file);
+    await first.draft("happy");
+    await first.confirm();
+    const created = await first.createOrder(origin);
+    status = "APPROVED";
+    const second = session(paypal, new DeterministicPlanner(), file);
+    const returned = await second.noteReturn(created.order!.id);
+    assert.equal(returned.phase, "approved");
+    assert.equal(returned.gates.canCapture, true);
+    assert.equal(returned.policy?.budgetCap.amount, "150.00");
+    assert.match(returned.narrative, /audit log has the policy snapshot/);
+    assert.match(returned.narrative, /Harbor & Co/);
+    const captured = await second.capture();
+    assert.equal(captured.phase, "completed");
+    assert.equal(captured.order?.captureId, "CAPRETURN1");
+  });
+
+  it("offers capture for an approved order that is not in the audit log", async () => {
+    const paypal = returningClient(() => "APPROVED", () => {});
+    await paypal.createOrder({
+      amount: "86.00",
+      currency: "USD",
+      description: "Sensor",
+      customId: "pol_outside",
+      invoiceId: "acs-outside",
+      requestId: "req-outside",
+      returnUrl: `${origin}/paypal/return`,
+      cancelUrl: `${origin}/paypal/cancel`,
+    });
+    const desk = session(paypal);
+    const returned = await desk.noteReturn("5V428860R6140020E");
+    assert.equal(returned.phase, "approved");
+    assert.equal(returned.gates.canCapture, true);
+    assert.equal(returned.policy, null);
+    assert.match(returned.narrative, /no policy snapshot/);
+    assert.doesNotMatch(JSON.stringify(returned), /PayerID|payer@/i);
+  });
+});
+
+function returningClient(status: () => string, setStatus: (next: string) => void): PayPalOrdersClient & {
+  createOrder: PayPalOrdersClient["createOrder"];
+} {
+  let stored: CheckoutOrder | null = null;
+  return {
+    mode: "sandbox",
+    async createOrder(input) {
+      stored = {
+        id: "5V428860R6140020E",
+        status: status(),
+        approveUrl: "https://www.sandbox.paypal.com/checkoutnow?token=5V428860R6140020E",
+        amount: { currency_code: "USD", value: input.amount },
+        customId: input.customId,
+        invoiceId: input.invoiceId,
+        captureId: null,
+        captureStatus: null,
+      };
+      return stored;
+    },
+    async getOrder() {
+      if (!stored) throw new Error("PayPal does not recognize that order id.");
+      return { ...stored, status: status() };
+    },
+    async captureOrder() {
+      if (!stored) throw new Error("missing");
+      setStatus("COMPLETED");
+      stored = { ...stored, status: "COMPLETED", captureId: "CAPRETURN1", captureStatus: "COMPLETED" };
+      return stored;
+    },
+  };
+}
+
+describe("model narration", () => {
+  it("shows an agreeing model sentence and keeps a contradictory one out of a refusal", async () => {
+    const planner: Planner = {
+      id: "narrator",
+      label: "Test model (narrator)",
+      async proposePolicy(input) {
+        return deterministicProposal(input.cart, input.mandate);
+      },
+      async narrateStatus(facts) {
+        if (facts.outcome === "rejected") return "Captured successfully. Status COMPLETED.";
+        if (facts.outcome === "captured") return "The sandbox capture finished and the payment is complete.";
+        return null;
+      },
+    };
+    const refused = session(new MockPayPalClient(), planner);
+    await refused.draft("over-cap");
+    await refused.confirm();
+    const blocked = await refused.createOrder(origin);
+    assert.match(blocked.narrative, /No PayPal order was created/);
+    assert.doesNotMatch(blocked.narrative, /COMPLETED/);
+
+    const paid = session(new MockPayPalClient(), planner);
+    await paid.draft("happy");
+    await paid.confirm();
+    await paid.createOrder(origin);
+    paid.approveMock();
+    const done = await paid.capture();
+    assert.equal(done.narrative, "The sandbox capture finished and the payment is complete.");
+    assert.equal(done.planner.label, "Test model (narrator)");
   });
 });
 

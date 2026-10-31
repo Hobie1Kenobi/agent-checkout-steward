@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createPlanner, parsePolicyJson } from "../src/planner/planner";
+import { createPlanner, DEFAULT_GATEWAY_MODEL, parsePolicyJson } from "../src/planner/planner";
+import { narrationAgrees } from "../src/narrate";
 import { MANDATE, type Cart } from "../src/policy/mandate";
 import { validateProposal } from "../src/policy/validate";
 
@@ -48,5 +49,40 @@ describe("policy planner", () => {
     assert.equal(validateProposal(proposal).ok, true);
     assert.equal(calls.length, 1);
     assert.match(calls[0], /api\.anthropic\.com/);
+  });
+
+  it("drafts and narrates through the AI Gateway with an injected model", async () => {
+    const models: string[] = [];
+    const planner = createPlanner(
+      { LLM_PROVIDER: "auto", AI_GATEWAY_API_KEY: "test-gateway-key", AI_GATEWAY_MODEL: "google/gemini-2.5-flash" },
+      {
+        generateText: async (request) => {
+          models.push(request.model);
+          if (request.prompt.includes("Outcome:")) return "PayPal approved the order. You can capture it.";
+          return '{"budgetCap":{"currency":"USD","amount":"150.00"},"merchantAllowlist":["Harbor & Co","Northline Supply"],"purchaseKind":"one_time","reapproval":{"onAmountChange":true,"onMerchantChange":true},"intentSummary":"One-time sensor from Harbor & Co."}';
+        },
+      },
+    );
+    assert.equal(planner.id, "gateway");
+    assert.equal(planner.label, "AI Gateway (google/gemini-2.5-flash)");
+    const proposal = await planner.proposePolicy({ mandate: MANDATE, cart, intent: "Buy the sensor." });
+    assert.equal(validateProposal(proposal).ok, true);
+    const spoken = await planner.narrateStatus?.({
+      outcome: "approved",
+      facts: "PayPal reports order 5V428860R6140020E as APPROVED.",
+      orderId: "5V428860R6140020E",
+      orderStatus: "APPROVED",
+    });
+    assert.match(spoken ?? "", /capture/);
+    assert.deepEqual(models, ["google/gemini-2.5-flash", "google/gemini-2.5-flash"]);
+  });
+
+  it("uses the documented default gateway model and rejects a paid claim on a refusal", () => {
+    const planner = createPlanner({ LLM_PROVIDER: "gateway", AI_GATEWAY_API_KEY: "test-gateway-key" }, {
+      generateText: async () => "{}",
+    });
+    assert.equal(planner.label, `AI Gateway (${DEFAULT_GATEWAY_MODEL})`);
+    assert.equal(narrationAgrees("rejected", "Captured successfully. Status COMPLETED."), false);
+    assert.equal(narrationAgrees("captured", "The sandbox capture finished and the payment is complete."), true);
   });
 });

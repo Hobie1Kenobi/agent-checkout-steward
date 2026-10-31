@@ -32,10 +32,10 @@ export function createCheckoutServer(session: CheckoutSession): Server {
         return sendJson(res, 200, await session.draft(draft[1]));
       }
       if (req.method === "POST" && url.pathname === "/api/confirm") {
-        return sendJson(res, 200, session.confirm());
+        return sendJson(res, 200, await session.confirm());
       }
       if (req.method === "POST" && url.pathname === "/api/revise") {
-        return sendJson(res, 200, session.revise());
+        return sendJson(res, 200, await session.revise());
       }
       if (req.method === "POST" && url.pathname === "/api/order") {
         return sendJson(res, 200, await session.createOrder(requestOrigin(req)));
@@ -47,7 +47,7 @@ export function createCheckoutServer(session: CheckoutSession): Server {
         return sendJson(res, 200, await session.capture());
       }
       if (req.method === "POST" && url.pathname === "/api/cancel") {
-        return sendJson(res, 200, session.cancel());
+        return sendJson(res, 200, await session.cancel());
       }
       if (req.method === "POST" && url.pathname === "/api/approve") {
         return sendJson(res, 200, session.approveMock(url.searchParams.get("token") ?? undefined));
@@ -57,7 +57,7 @@ export function createCheckoutServer(session: CheckoutSession): Server {
         return sendHtml(res, 200, resultPage("Back from PayPal", view.narrative, view.phase === "approved"));
       }
       if (req.method === "GET" && url.pathname === "/paypal/cancel") {
-        const view = session.noteCancel(requiredToken(url));
+        const view = await session.noteCancel(requiredToken(url));
         return sendHtml(res, 200, resultPage("Checkout cancelled", view.narrative, false));
       }
       if (req.method === "GET" && url.pathname === "/mock/approve") {

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 export interface PolicySnapshot {
@@ -27,6 +27,7 @@ export type AuditEventName =
   | "cancelled"
   | "declined"
   | "paypal_error"
+  | "order_adopted"
   | "desk_reset";
 
 export interface AuditEvent {
@@ -113,6 +114,35 @@ export class AuditLog {
       event: "desk_reset",
       detail: "Desk reset.",
     });
+  }
+
+  policyForOrder(orderId: string, customId?: string): PolicySnapshot | undefined {
+    const events = [...this.storedEvents(), ...this.events];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event.orderId === orderId && event.policy) return event.policy;
+    }
+    if (!customId) return undefined;
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event.customId === customId && event.policy) return event.policy;
+    }
+    return undefined;
+  }
+
+  private storedEvents(): AuditEvent[] {
+    if (!this.filePath || !existsSync(this.filePath)) return [];
+    const events: AuditEvent[] = [];
+    for (const line of readFileSync(this.filePath, "utf8").split(/\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as AuditEvent;
+        if (parsed && typeof parsed.event === "string" && typeof parsed.detail === "string") events.push(parsed);
+      } catch {
+        continue;
+      }
+    }
+    return events;
   }
 
   private append(event: AuditEvent): void {

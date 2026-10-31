@@ -40,6 +40,37 @@ describe("checkout desk", () => {
       const captured = await post(base, "/api/capture");
       assert.equal(captured.phase, "completed");
       assert.equal(captured.order.status, "COMPLETED");
+
+      const again = buildSession({
+        CHECKOUT_MODE: "mock",
+        LLM_PROVIDER: "none",
+        CHECKOUT_AUDIT_PATH: "",
+      });
+      const againServer = await listen(again);
+      const againPort = (againServer.address() as AddressInfo).port;
+      const againBase = `http://127.0.0.1:${againPort}`;
+      try {
+        const drafted = await post(againBase, "/api/scenarios/happy/draft");
+        assert.equal(drafted.phase, "draft_ready");
+        await post(againBase, "/api/confirm");
+        const opened = await post(againBase, "/api/order");
+        const payer = "PAYER-SHOULD-NOT-APPEAR";
+        const returned = await fetch(`${againBase}/paypal/return?token=${opened.order.id}&PayerID=${payer}`);
+        const html = await returned.text();
+        assert.equal(returned.status, 200);
+        assert.doesNotMatch(html, /does not match the open order/);
+        assert.doesNotMatch(html, new RegExp(payer));
+        await post(againBase, `/api/approve?token=${opened.order.id}`);
+        const approved = await fetch(`${againBase}/paypal/return?token=${opened.order.id}&PayerID=${payer}`);
+        const approvedHtml = await approved.text();
+        assert.equal(approved.status, 200);
+        assert.match(approvedHtml, /approved/i);
+        assert.doesNotMatch(approvedHtml, new RegExp(payer));
+        const finished = await post(againBase, "/api/capture");
+        assert.equal(finished.phase, "completed");
+      } finally {
+        await new Promise<void>((resolve, reject) => againServer.close((error) => (error ? reject(error) : resolve())));
+      }
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     }

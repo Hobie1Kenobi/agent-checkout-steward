@@ -31,18 +31,24 @@ Live hosts (`api-m.paypal.com`, `api.paypal.com`) are rejected before a request 
 
 ## How AI is used
 
-The planner asks the configured model for policy JSON only: budget cap, merchant allowlist, `purchaseKind: "one_time"`, both re-approval flags, and a one-sentence summary. `validateProposal` accepts the JSON when it fits the mandate. A draft that fails validation is discarded and the deterministic fallback drafts a valid policy.
+The planner asks the configured model for two things:
 
-Status sentences are written from the coded outcome (allowed, over cap, off-list merchant, re-approval, created, approved, captured, cancelled, declined, retry). The model does not get to describe a rejected cart as paid.
+1. **Policy JSON**: budget cap, merchant allowlist, `purchaseKind: "one_time"`, both re-approval flags, and a one-sentence summary.
+2. **Status narration**: one or two sentences that explain the outcome the code already chose.
+
+`validateProposal` accepts the JSON only when it fits the mandate. A draft that fails validation is discarded and the deterministic fallback drafts a valid policy. A narration that contradicts the outcome (for example, calling a refusal a completed capture) is discarded. The audit log keeps the coded sentence. The desk badge shows which planner and model are active, such as `AI Gateway (google/gemini-2.5-flash)` or `Deterministic fallback (no model call)`.
 
 With no model key, `LLM_PROVIDER=auto` uses the deterministic fallback, so the desk and the demo run without an AI account.
 
 | `LLM_PROVIDER` | Behavior |
 | --- | --- |
-| `auto` | Anthropic if `ANTHROPIC_API_KEY` is set, otherwise OpenAI-compatible if `OPENAI_BASE_URL` is set, otherwise the fallback |
+| `auto` | AI Gateway if `AI_GATEWAY_API_KEY` is set, otherwise OpenAI-compatible if `OPENAI_BASE_URL` is set, otherwise Anthropic if `ANTHROPIC_API_KEY` is set, otherwise the fallback |
+| `gateway` | Vercel AI Gateway through the AI SDK (`generateText` + `gateway(model)`). Requires `AI_GATEWAY_API_KEY`. Model is `AI_GATEWAY_MODEL` (default `google/gemini-2.5-flash`) |
+| `openai` | `POST {OPENAI_BASE_URL}/chat/completions` (Ollama and any OpenAI-compatible host) |
 | `anthropic` | Anthropic Messages API |
-| `openai` | `POST {OPENAI_BASE_URL}/chat/completions` (Ollama works) |
 | `none` | Deterministic fallback |
+
+The gateway reads `AI_GATEWAY_API_KEY` from the environment. Model ids are `provider/model` values from https://ai-gateway.vercel.sh/v1/models.
 
 ## Architecture
 
@@ -126,8 +132,10 @@ The badge reads **PayPal sandbox**. Run the sensor purchase:
 2. Press **Create PayPal order**.
 3. Press **Open PayPal approval** (or copy the approval link). A sandbox checkout tab opens.
 4. Sign in as the **US Personal** test buyer. The email and system-generated password are under PayPal Developer Dashboard → Testing Tools → Sandbox Accounts. This is not a live PayPal login.
-5. Approve the payment. PayPal redirects the browser to `/paypal/return` on this desk. The desk also checks the order every few seconds.
+5. Approve the payment. PayPal redirects the browser to `/paypal/return?token=ORDER_ID&PayerID=...` on this desk. The desk ignores `PayerID`. It also checks the order every few seconds while it is waiting.
 6. When the status is `APPROVED`, press **Capture payment**.
+
+That desk path is the one to record: create the order on the desk, approve as the US Personal buyer, land on the return page, then capture. If the order was created by `npm run demo:sandbox` instead, the return page still looks the order up with `GET /v2/checkout/orders/{id}`. When `data/audit.jsonl` has the policy snapshot, the desk adopts that snapshot and offers capture. When the snapshot is missing, it still shows the PayPal status and offers capture once the order is `APPROVED`.
 
 The same create-and-print-the-link path from a terminal:
 
@@ -153,15 +161,10 @@ npm test
 npm run typecheck
 ```
 
-`npm test` covers the mandate validator, the enforcer (over cap, off-list merchant, amount change, merchant change, subscription), the deterministic and Anthropic planners with a fake fetch, the Orders v2 request shape (OAuth, create, approve link, capture retry, declined instrument, live-host refusal), the mock session, and the desk HTTP API. Nothing in the test suite calls `api-m.sandbox.paypal.com`.
+`npm test` covers the mandate validator, the enforcer (over cap, off-list merchant, amount change, merchant change, subscription), the deterministic, Anthropic, and AI Gateway planners (the gateway call is injected, not sent to Vercel), narration that is not allowed to overturn a refusal, the Orders v2 request shape, the mock session, PayPal return adoption, and the desk HTTP API. Nothing in the test suite calls `api-m.sandbox.paypal.com` or the AI Gateway.
 
-## What still needs a live sandbox run
+## Live sandbox
 
-This environment does not have the sandbox credentials, so approval and capture have not been executed against PayPal from here. The client matches the Orders v2 calls above and is ready for that check. With `.env` filled in, still confirm on a machine that has the credentials:
+The CLI path has been run against the sandbox: `demo:sandbox` created order `5V428860R6140020E` (`PAYER_ACTION_REQUIRED`), the US Personal test buyer approved it, and `npm run capture` returned capture `2JR76938T1840114E` `COMPLETED`.
 
-- OAuth and `POST /v2/checkout/orders` succeed, and the response includes an approval link on `www.sandbox.paypal.com`.
-- The US Personal buyer can open that link, sign in, and approve.
-- `GET /v2/checkout/orders/{id}` then shows `APPROVED`, and capture returns `COMPLETED` with a capture id.
-- The return URL on `http://127.0.0.1:4320/paypal/return` is accepted. If it is not, set `CHECKOUT_PUBLIC_BASE`.
-- The declined scenario's negative-test header returns `INSTRUMENT_DECLINED` and the desk explains it.
-- The audit line for the live order contains the order id and the policy snapshot, and does not contain the client secret or the access token.
+The desk return handler now adopts an order that was created outside the open session. The recording path is still create on the desk, approve, return, then capture. If PayPal rejects the `http://127.0.0.1:4320/paypal/return` URL on create, set `CHECKOUT_PUBLIC_BASE` to an https origin that reaches the desk. Approval from the HATEOAS link works either way.

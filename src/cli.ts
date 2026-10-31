@@ -48,7 +48,7 @@ async function runHappy(): Promise<void> {
   const session = buildSession();
   const origin = publicBase(process.env, listenPort());
   await session.draft("happy");
-  session.confirm();
+  await session.confirm();
   await session.createOrder(origin);
   session.approveMock();
   const view = await session.capture();
@@ -66,7 +66,7 @@ async function runSandboxOrder(): Promise<void> {
   const session = buildSession();
   const origin = publicBase(process.env, listenPort());
   await session.draft("happy");
-  session.confirm();
+  await session.confirm();
   const view = await session.createOrder(origin);
   printView(view);
   if (view.phase !== "awaiting_buyer" || !view.order?.approveUrl) {
@@ -92,25 +92,25 @@ async function runErrors(): Promise<void> {
 async function overCap(origin: string): Promise<DeskView> {
   const session = buildSession();
   await session.draft("over-cap");
-  session.confirm();
+  await session.confirm();
   return session.createOrder(origin);
 }
 
 async function offList(origin: string): Promise<DeskView> {
   const session = buildSession();
   await session.draft("off-list");
-  session.confirm();
+  await session.confirm();
   return session.createOrder(origin);
 }
 
 async function amountChange(origin: string): Promise<DeskView> {
   const session = buildSession();
   await session.draft("amount-change");
-  session.confirm();
-  session.revise();
+  await session.confirm();
+  await session.revise();
   const blocked = session.view();
   if (blocked.phase !== "reapproval") throw new Error("Amount change did not ask for a new approval.");
-  session.confirm();
+  await session.confirm();
   await session.createOrder(origin);
   session.approveMock();
   return session.capture();
@@ -119,7 +119,7 @@ async function amountChange(origin: string): Promise<DeskView> {
 async function cancelled(origin: string): Promise<DeskView> {
   const session = buildSession();
   await session.draft("cancel");
-  session.confirm();
+  await session.confirm();
   await session.createOrder(origin);
   return session.cancel();
 }
@@ -127,7 +127,7 @@ async function cancelled(origin: string): Promise<DeskView> {
 async function declined(origin: string): Promise<DeskView> {
   const session = buildSession();
   await session.draft("declined");
-  session.confirm();
+  await session.confirm();
   await session.createOrder(origin);
   session.approveMock();
   return session.capture();

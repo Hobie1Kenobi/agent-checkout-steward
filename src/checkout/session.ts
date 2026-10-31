@@ -11,9 +11,12 @@ import {
   narrateConfirmed,
   narrateDecision,
   narrateDeclined,
+  narrateAdopted,
   narrateDraft,
   narrateOrderCreated,
+  narrateReturnMiss,
   narrateRetry,
+  narrationAgrees,
 } from "../narrate";
 import { enforce, type Decision } from "../policy/enforce";
 import { MANDATE, type ApprovalSnapshot, type Cart, type PurchasePolicy } from "../policy/mandate";
@@ -86,6 +89,7 @@ export class CheckoutSession {
   private validatorNote: string | null = null;
   private revised = false;
   private busy = false;
+  private idle: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly paypal: PayPalOrdersClient,
@@ -191,7 +195,7 @@ export class CheckoutSession {
     });
   }
 
-  confirm(): DeskView {
+  async confirm(): Promise<DeskView> {
     if (!this.policy || !this.cart) throw new Error("Draft a policy before confirming it.");
     if (this.phase !== "draft_ready" && this.phase !== "reapproval") {
       throw new Error("This policy is already confirmed.");
@@ -206,17 +210,19 @@ export class CheckoutSession {
     };
     this.phase = "confirmed";
     this.warning = null;
-    this.narrative = narrateConfirmed(this.policy, this.cart);
+    const facts = narrateConfirmed(this.policy, this.cart);
+    this.narrative = facts;
     this.audit.record({
       at: new Date().toISOString(),
       event: "policy_confirmed",
       policy: this.snapshot(),
-      detail: this.narrative,
+      detail: facts,
     });
+    this.narrative = await this.voice(facts, "confirmed");
     return this.view();
   }
 
-  revise(): DeskView {
+  async revise(): Promise<DeskView> {
     if (!this.scenario?.revision || !this.cart || !this.policy || !this.approval) {
       throw new Error("Confirm a policy before applying a revision.");
     }
@@ -233,13 +239,15 @@ export class CheckoutSession {
       throw new Error("The revision did not change the approved cart.");
     }
     this.phase = decision.code === "reapproval_required" ? "reapproval" : "rejected";
-    this.narrative = narrateDecision(decision);
+    const facts = narrateDecision(decision);
+    this.narrative = facts;
     this.audit.record({
       at: new Date().toISOString(),
       event: decision.code === "reapproval_required" ? "reapproval_required" : "checkout_rejected",
       policy: this.snapshot(),
-      detail: this.narrative,
+      detail: facts,
     });
+    this.narrative = await this.voice(facts, this.phase === "reapproval" ? "reapproval" : "rejected");
     return this.view();
   }
 
@@ -270,15 +278,17 @@ export class CheckoutSession {
         this.order = order;
         this.phase = "awaiting_buyer";
         this.warning = null;
-        this.narrative = narrateOrderCreated(this.paypal.mode, order, this.cart!);
+        const facts = narrateOrderCreated(this.paypal.mode, order, this.cart!);
+        this.narrative = facts;
         this.audit.record({
           at: new Date().toISOString(),
           event: "order_created",
           orderId: order.id,
           customId: order.customId,
           policy: this.snapshot(),
-          detail: this.narrative,
+          detail: facts,
         });
+        this.narrative = await this.voice(facts, "order_created", { orderId: order.id, orderStatus: order.status });
       } catch (error) {
         this.notePayPalError(error);
       }
@@ -290,8 +300,15 @@ export class CheckoutSession {
     if (!this.order) throw new Error("Create an order before checking approval.");
     if (this.phase === "cancelled" || this.phase === "completed" || this.phase === "declined") return this.view();
     return this.occupy(async () => {
+      const previous = this.phase;
       try {
         await this.pullOrder();
+        if (this.phase !== previous && this.order) {
+          this.narrative = await this.voice(this.narrative, outcomeForPhase(this.phase), {
+            orderId: this.order.id,
+            orderStatus: this.order.status,
+          });
+        }
       } catch (error) {
         this.notePayPalError(error);
       }
@@ -314,28 +331,32 @@ export class CheckoutSession {
         this.order = captured;
         this.phase = "completed";
         this.warning = null;
-        this.narrative = narrateCaptured(this.paypal.mode, captured);
+        const facts = narrateCaptured(this.paypal.mode, captured);
+        this.narrative = facts;
         this.audit.record({
           at: new Date().toISOString(),
           event: "captured",
           orderId: captured.id,
           customId: captured.customId,
           policy: this.snapshot(),
-          detail: this.narrative,
+          detail: facts,
         });
+        this.narrative = await this.voice(facts, "captured", { orderId: captured.id, orderStatus: captured.status });
       } catch (error) {
         if (error instanceof PayPalApiError && error.issue === "INSTRUMENT_DECLINED") {
           this.phase = "declined";
           this.warning = null;
-          this.narrative = narrateDeclined(this.paypal.mode, this.order!.id);
+          const facts = narrateDeclined(this.paypal.mode, this.order!.id);
+          this.narrative = facts;
           this.audit.record({
             at: new Date().toISOString(),
             event: "declined",
             orderId: this.order!.id,
             customId: this.order!.customId,
             policy: this.snapshot(),
-            detail: this.narrative,
+            detail: facts,
           });
+          this.narrative = await this.voice(facts, "declined", { orderId: this.order!.id, orderStatus: "DECLINED" });
         } else if (error instanceof PayPalApiError && error.issue === "ORDER_ALREADY_CAPTURED") {
           await this.pullOrder();
         } else {
@@ -346,7 +367,7 @@ export class CheckoutSession {
     });
   }
 
-  cancel(): DeskView {
+  async cancel(): Promise<DeskView> {
     if (!this.order || (this.phase !== "awaiting_buyer" && this.phase !== "approved")) {
       throw new Error("There is no open checkout to cancel.");
     }
@@ -355,15 +376,17 @@ export class CheckoutSession {
     }
     this.phase = "cancelled";
     this.warning = null;
-    this.narrative = narrateCancelled(this.paypal.mode, this.order.id);
+    const facts = narrateCancelled(this.paypal.mode, this.order.id);
+    this.narrative = facts;
     this.audit.record({
       at: new Date().toISOString(),
       event: "cancelled",
       orderId: this.order.id,
       customId: this.order.customId,
       policy: this.snapshot(),
-      detail: this.narrative,
+      detail: facts,
     });
+    this.narrative = await this.voice(facts, "cancelled", { orderId: this.order.id, orderStatus: this.order.status });
     return this.view();
   }
 
@@ -391,33 +414,38 @@ export class CheckoutSession {
   }
 
   async noteReturn(token: string): Promise<DeskView> {
-    if (!this.order || token !== this.order.id) {
-      throw new Error("That return link does not match the open order.");
+    await this.whenIdle();
+    if (this.order && token === this.order.id) {
+      if (this.phase === "cancelled" || this.phase === "completed" || this.phase === "declined") return this.view();
+      return this.refreshApproval();
     }
-    if (this.phase === "cancelled" || this.phase === "completed" || this.phase === "declined") return this.view();
-    return this.refreshApproval();
+    return this.adoptReturnedOrder(token);
   }
 
-  noteCancel(token: string): DeskView {
-    if (!this.order || token !== this.order.id) {
-      throw new Error("That cancel link does not match the open order.");
+  async noteCancel(token: string): Promise<DeskView> {
+    await this.whenIdle();
+    if (this.order && token === this.order.id) {
+      if (this.phase === "completed" || this.phase === "declined") {
+        throw new Error("This checkout is already finished.");
+      }
+      if (this.phase === "cancelled") return this.view();
+      return this.cancel();
     }
-    if (this.phase === "completed" || this.phase === "declined") {
-      throw new Error("This checkout is already finished.");
-    }
-    if (this.phase === "cancelled") return this.view();
-    return this.cancel();
+    return this.adoptCancelledOrder(token);
   }
 
-  private rejectCheckout(decision: Decision): DeskView {
-    this.phase = !decision.ok && decision.code === "reapproval_required" ? "reapproval" : "rejected";
-    this.narrative = narrateDecision(decision);
+  private async rejectCheckout(decision: Decision): Promise<DeskView> {
+    if (decision.ok) return this.view();
+    this.phase = decision.code === "reapproval_required" ? "reapproval" : "rejected";
+    const facts = narrateDecision(decision);
+    this.narrative = facts;
     this.audit.record({
       at: new Date().toISOString(),
-      event: !decision.ok && decision.code === "reapproval_required" ? "reapproval_required" : "checkout_rejected",
+      event: decision.code === "reapproval_required" ? "reapproval_required" : "checkout_rejected",
       policy: this.snapshot(),
-      detail: this.narrative,
+      detail: facts,
     });
+    this.narrative = await this.voice(facts, this.phase === "reapproval" ? "reapproval" : "rejected");
     return this.view();
   }
 
@@ -527,6 +555,136 @@ export class CheckoutSession {
     });
   }
 
+  private async adoptReturnedOrder(token: string): Promise<DeskView> {
+    return this.occupy(async () => {
+      let latest: CheckoutOrder;
+      try {
+        latest = await this.paypal.getOrder(token, {
+          onRetry: (notice) => this.noteRetry("read_retry", notice),
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "The order lookup failed.";
+        this.warning = reason;
+        this.narrative = narrateReturnMiss(token, reason);
+        return this.view();
+      }
+      this.installReturnedOrder(latest);
+      this.applyRemote(latest);
+      const snapshot = this.audit.policyForOrder(latest.id, latest.customId);
+      const adopted = narrateAdopted(
+        latest,
+        snapshot
+          ? { cartMerchant: snapshot.cartMerchant, cartAmount: snapshot.cartAmount, budgetCap: snapshot.budgetCap }
+          : null,
+      );
+      this.narrative = await this.voice(adopted, outcomeForPhase(this.phase), {
+        orderId: latest.id,
+        orderStatus: latest.status,
+      });
+      this.audit.record({
+        at: new Date().toISOString(),
+        event: "order_adopted",
+        orderId: latest.id,
+        customId: latest.customId,
+        policy: this.snapshot(),
+        detail: adopted,
+      });
+      return this.view();
+    });
+  }
+
+  private async adoptCancelledOrder(token: string): Promise<DeskView> {
+    return this.occupy(async () => {
+      try {
+        const latest = await this.paypal.getOrder(token);
+        this.installReturnedOrder(latest);
+        this.order = latest;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "The order lookup failed.";
+        this.warning = reason;
+        this.narrative = narrateReturnMiss(token, reason);
+        return this.view();
+      }
+      this.phase = "cancelled";
+      this.warning = null;
+      const facts = `The buyer cancelled on PayPal before capture. Order ${token} is ${this.order?.status ?? "unknown"} at PayPal. Capture was not requested, so no funds moved.`;
+      this.narrative = facts;
+      this.audit.record({
+        at: new Date().toISOString(),
+        event: "cancelled",
+        orderId: token,
+        customId: this.order?.customId,
+        policy: this.snapshot(),
+        detail: facts,
+      });
+      this.narrative = await this.voice(facts, "cancelled", { orderId: token, orderStatus: this.order?.status });
+      return this.view();
+    });
+  }
+
+  private installReturnedOrder(latest: CheckoutOrder): void {
+    const stored = this.audit.policyForOrder(latest.id, latest.customId);
+    const validated = stored ? validateProposal(policyFromSnapshot(stored), MANDATE) : null;
+    if (validated?.ok) {
+      this.policy = validated.policy;
+      this.cart = {
+        merchant: stored!.cartMerchant,
+        amount: stored!.cartAmount,
+        currency: "USD",
+        description: stored!.intentSummary,
+        sku: "returned",
+        kind: "one_time",
+      };
+      const merchant = canonicalMerchant(this.cart.merchant, this.policy.merchantAllowlist) ?? this.cart.merchant;
+      this.approval = {
+        merchant,
+        amount: this.cart.amount,
+        currency: "USD",
+        policy: structuredClone(this.policy),
+        approvedAt: new Date().toISOString(),
+      };
+    } else {
+      this.policy = null;
+      this.approval = null;
+      this.cart = {
+        merchant: "PayPal order",
+        amount: /^\d+\.\d{2}$/.test(latest.amount.value) ? latest.amount.value : "0.01",
+        currency: "USD",
+        description: "Returned from PayPal",
+        sku: "returned",
+        kind: "one_time",
+      };
+    }
+    this.scenario = null;
+    this.revised = false;
+    this.hint = null;
+    this.warning = null;
+  }
+
+  private async whenIdle(): Promise<void> {
+    while (this.busy) await this.idle;
+  }
+
+  private async voice(
+    facts: string,
+    outcome: string,
+    extra?: { orderId?: string; orderStatus?: string },
+  ): Promise<string> {
+    if (!this.planner.narrateStatus) return facts;
+    try {
+      const text = await this.planner.narrateStatus({
+        outcome,
+        facts,
+        orderId: extra?.orderId,
+        orderStatus: extra?.orderStatus,
+      });
+      if (text && narrationAgrees(outcome, text)) return text.trim();
+    } catch {
+      return facts;
+    }
+    return facts;
+  }
+
   private snapshot(): PolicySnapshot | undefined {
     if (!this.policy || !this.cart) return undefined;
     return {
@@ -544,12 +702,37 @@ export class CheckoutSession {
   private async occupy<T>(work: () => Promise<T>): Promise<T> {
     if (this.busy) throw new Error("A checkout step is already running.");
     this.busy = true;
+    let release: () => void = () => {};
+    this.idle = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     try {
       return await work();
     } finally {
       this.busy = false;
+      release();
     }
   }
+}
+
+function outcomeForPhase(phase: Phase): string {
+  if (phase === "approved") return "approved";
+  if (phase === "completed") return "captured";
+  if (phase === "cancelled") return "cancelled";
+  if (phase === "declined") return "declined";
+  if (phase === "rejected") return "rejected";
+  if (phase === "reapproval") return "reapproval";
+  return "awaiting";
+}
+
+function policyFromSnapshot(snapshot: PolicySnapshot): PurchasePolicy {
+  return {
+    budgetCap: { currency: "USD", amount: snapshot.budgetCap },
+    merchantAllowlist: [...snapshot.merchantAllowlist],
+    purchaseKind: "one_time",
+    reapproval: { onAmountChange: true, onMerchantChange: true },
+    intentSummary: snapshot.intentSummary,
+  };
 }
 
 export function policyCustomId(policy: PurchasePolicy, cart: Cart): string {

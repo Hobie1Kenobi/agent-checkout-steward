@@ -103,6 +103,41 @@ export function narrateRetry(status: number, failedAttempt: number, maxAttempts:
   return `PayPal returned HTTP ${status} on attempt ${failedAttempt} of ${maxAttempts}. Trying again.`;
 }
 
+export function narrateAdopted(order: CheckoutOrder, snapshot: { cartMerchant: string; cartAmount: string; budgetCap: string } | null): string {
+  const status =
+    order.status === "APPROVED"
+      ? `PayPal reports order ${order.id} as APPROVED. You can capture it.`
+      : order.status === "COMPLETED"
+        ? `PayPal order ${order.id} is already COMPLETED${order.captureId ? `, capture ${order.captureId}` : ""}.`
+        : order.status === "VOIDED"
+          ? `PayPal order ${order.id} is VOIDED. Nothing further will be captured.`
+          : `PayPal status is ${order.status}. Capture stays off until the status is APPROVED.`;
+  if (snapshot) {
+    return `PayPal sent the browser back for order ${order.id}. The audit log has the policy snapshot for ${snapshot.cartMerchant} at USD ${snapshot.cartAmount}, cap USD ${snapshot.budgetCap}. ${status}`;
+  }
+  return `PayPal sent the browser back for order ${order.id}. This desk session did not create it, and the audit log has no policy snapshot for it. ${status}`;
+}
+
+export function narrateReturnMiss(orderId: string, reason: string): string {
+  return `PayPal did not return order ${orderId}. ${reason}`;
+}
+
+const PAID_CLAIM = /\b(captured|completed)\b/i;
+const REFUSED_CLAIM = /no paypal order was created|was declined|buyer cancelled/i;
+
+export function narrationAgrees(outcome: string, text: string): boolean {
+  const clean = text.trim();
+  if (clean.length < 8 || clean.length > 600) return false;
+  if (/[\u0000-\u001f]/.test(clean)) return false;
+  const claimsPaid = PAID_CLAIM.test(clean);
+  const claimsRefused = REFUSED_CLAIM.test(clean);
+  if ((outcome === "rejected" || outcome === "reapproval" || outcome === "declined" || outcome === "cancelled") && claimsPaid) {
+    return false;
+  }
+  if ((outcome === "captured" || outcome === "approved") && claimsRefused) return false;
+  return true;
+}
+
 export function approvalInstructions(mode: CheckoutMode): string {
   if (mode === "mock") {
     return "Open the simulated approval page and approve as the test buyer, then come back and capture. Mock mode does not call PayPal.";
