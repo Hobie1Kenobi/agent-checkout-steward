@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Checkout Steward</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <p class="eyebrow">PayPal AI Hackathon · Orders v2 · sandbox or mock</p>
+        <h1>Agent Checkout Steward</h1>
+        <p class="tagline">An agent drafts a purchase policy. The code enforces it. PayPal sandbox takes the payment.</p>
+      </div>
+      <div class="badges">
+        <span class="badge" id="mode-badge">Mode</span>
+        <span class="badge quiet" id="planner-badge">Planner</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="acts" aria-label="Purchases">
+        <h2>Purchases</h2>
+        <ol id="scenario-list"></ol>
+        <button type="button" class="ghost" id="reset">Reset desk</button>
+        <p class="fine">PayPal moves sandbox money. This desk is not a PayPal product and there is no partnership. No live funds.</p>
+      </aside>
+
+      <main>
+        <section class="panel" id="story"></section>
+        <section class="panel" id="checkout"></section>
+      </main>
+
+      <aside class="side">
+        <section class="panel" id="policy-panel"></section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Audit</h2>
+            <p>Order id and the policy snapshot. No secrets and no payer data.</p>
+          </div>
+          <ol class="audit" id="audit"></ol>
+        </section>
+      </aside>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

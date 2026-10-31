@@ -1,0 +1,24 @@
+{
+  "name": "agent-checkout-steward",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Checkout Steward: a policy-bound checkout agent for the PayPal sandbox Orders v2 API. PayPal AI Hackathon 2026.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "demo": "tsx src/cli.ts demo",
+    "demo:errors": "tsx src/cli.ts demo --errors",
+    "demo:sandbox": "tsx src/cli.ts demo --sandbox",
+    "capture": "tsx src/cli.ts capture",
+    "serve": "tsx src/cli.ts serve",
+    "test": "tsx --test tests/env.test.ts tests/policy.test.ts tests/planner.test.ts tests/paypal.test.ts tests/checkout-flow.test.ts tests/server.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
